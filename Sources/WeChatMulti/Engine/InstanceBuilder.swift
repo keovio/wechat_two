@@ -91,6 +91,7 @@ enum InstanceBuilder {
         } catch {
             Log.warn("[" + id + "] 角标图标生成失败，沿用官方图标：" + error.localizedDescription)
         }
+        IconBadger.badgeStatusIcons(app: staging, label: String(Int(id) ?? 0))
 
         // ---- 6. 注入数据根 ----
         step(6, "注入 CFFIXED_USER_HOME")
