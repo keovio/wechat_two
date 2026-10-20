@@ -8,7 +8,7 @@ import Compression
 /// 实测（4.x，2026-10）：一张 44×36 的黑色模板 PNG，通用二进制里 arm64/x86_64 各一份，
 /// 每份前面紧挨着 4 字节大端长度（Qt rcc 未压缩条目格式）。
 ///
-/// 做法：在 dylib 里找到这些 PNG → 右下角挖出带编号的实心圆 →
+/// 做法：在 dylib 里找到这些 PNG → 改成「原图标缩小靠左 + 右侧编号」（IconBadger.stampStatus）→
 /// 用自带的极简 PNG 编码器写回（保证不比原图大），并改写前面的长度字段。
 /// 剩余字节保持原样，Qt 按长度字段读取，不受影响。
 ///
@@ -74,7 +74,7 @@ enum TrayIconPatcher {
         d[i..<(i + 4)].reduce(0) { ($0 << 8) | UInt32($1) }
     }
 
-    // MARK: - 极简 PNG 编码（RGBA8，单个 IDAT）
+    // MARK: - 极简 PNG 编码（RGBA8，单个 IDAT，自动选行滤波）
 
     static func encodePNG(_ image: CGImage) -> Data? {
         let w = image.width, h = image.height
@@ -84,26 +84,40 @@ enum TrayIconPatcher {
                                   space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-        // 反预乘 + 每行前加滤波字节 0
-        var raw = [UInt8]()
-        raw.reserveCapacity((w * 4 + 1) * h)
-        for y in 0..<h {
-            raw.append(0)
-            for x in 0..<w {
-                let i = (y * w + x) * 4
-                let a = px[i + 3]
-                if a == 0 {
-                    raw += [0, 0, 0, 0]
-                } else {
-                    for c in 0..<3 { raw.append(UInt8(min(255, Int(px[i + c]) * 255 / Int(a)))) }
-                    raw.append(a)
+        // 反预乘
+        let rowBytes = w * 4
+        var rgba = [UInt8](repeating: 0, count: rowBytes * h)
+        for i in stride(from: 0, to: px.count, by: 4) {
+            let a = px[i + 3]
+            guard a != 0 else { continue }
+            for c in 0..<3 { rgba[i + c] = UInt8(min(255, Int(px[i + c]) * 255 / Int(a))) }
+            rgba[i + 3] = a
+        }
+
+        // 分别试 None / Sub / Up 三种行滤波，取压缩后最小的 —— 新图必须不比原图大才能原地写回。
+        var best: (raw: [UInt8], deflated: Data)?
+        for filter in [0, 1, 2] as [UInt8] {
+            var raw = [UInt8]()
+            raw.reserveCapacity((rowBytes + 1) * h)
+            for y in 0..<h {
+                raw.append(filter)
+                let row = y * rowBytes
+                for x in 0..<rowBytes {
+                    let cur = rgba[row + x]
+                    switch filter {
+                    case 1: raw.append(cur &- (x >= 4 ? rgba[row + x - 4] : 0))
+                    case 2: raw.append(cur &- (y > 0 ? rgba[row - rowBytes + x] : 0))
+                    default: raw.append(cur)
+                    }
                 }
             }
+            guard let d = deflate(raw) else { continue }
+            if best == nil || d.count < best!.deflated.count { best = (raw, d) }
         }
-        guard let deflated = deflate(raw) else { return nil }
+        guard let chosen = best else { return nil }
         var zlib = Data([0x78, 0x9C])
-        zlib.append(deflated)
-        appendBE(&zlib, adler32(raw))
+        zlib.append(chosen.deflated)
+        appendBE(&zlib, adler32(chosen.raw))
 
         var ihdr = Data()
         appendBE(&ihdr, UInt32(w)); appendBE(&ihdr, UInt32(h))
