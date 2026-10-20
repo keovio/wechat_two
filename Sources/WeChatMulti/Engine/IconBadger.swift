@@ -144,7 +144,7 @@ enum IconBadger {
         return changed
     }
 
-    private static func stampStatus(_ img: CGImage, label: String) -> CGImage? {
+    static func stampStatus(_ img: CGImage, label: String) -> CGImage? {
         let w = img.width, h = img.height
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
