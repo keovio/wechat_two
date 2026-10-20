@@ -84,8 +84,10 @@ enum InstanceBuilder {
 
         // ---- 5. 编号角标图标（失败不致命，只是少了角标） ----
         step(5, "生成编号角标图标")
+        var badged = false
         do {
             try IconBadger.apply(app: staging, sourceApp: source.bundlePath, label: String(Int(id) ?? 0))
+            badged = true
         } catch {
             Log.warn("[" + id + "] 角标图标生成失败，沿用官方图标：" + error.localizedDescription)
         }
@@ -127,6 +129,7 @@ enum InstanceBuilder {
         committed = true
         try? fm.removeItem(at: staging)   // RENAME_SWAP 后这里是旧 App 包
         try LSCacheRefresher.refresh(app: app)
+        if badged { IconBadger.flushIconCache(app: app) }
 
         // ---- 11. 落库 ----
         step(11, "写入注册表")
