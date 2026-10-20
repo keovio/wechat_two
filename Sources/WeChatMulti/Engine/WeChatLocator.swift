@@ -35,6 +35,17 @@ enum WeChatLocator {
         )
     }
 
+    /// 只读 Info.plist 拿版本号，不调用 codesign。
+    /// 菜单每次展开都会用它比对"实例是否落后于官方微信"，所以必须足够轻。
+    static func officialVersion() -> String? {
+        let plistURL = officialPath.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            return nil
+        }
+        return plist["CFBundleShortVersionString"] as? String
+    }
+
     /// 读 TeamIdentifier。失败返回 nil 而不是抛错——调用方用它做"官方未被改动"的验收。
     static func codesignTeamID(at url: URL) -> String? {
         guard let r = try? Shell.run("/usr/bin/codesign", ["-dv", url.path], allowFailure: true) else { return nil }
