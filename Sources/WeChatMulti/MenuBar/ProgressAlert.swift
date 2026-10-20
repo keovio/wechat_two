@@ -1,6 +1,6 @@
 import AppKit
 
-/// 创建实例要跑 10 步流水线（克隆 + 253 个 Mach-O 重签，约 3-6 秒），
+/// 创建实例要跑 11 步流水线（克隆 + 253 个 Mach-O 重签，约 3-6 秒），
 /// 用一个模态进度窗把用户挡在外面，避免重复点击导致并发写同一个目录。
 enum ProgressAlert {
     static func run(title: String, body: @escaping (_ report: @escaping (String) -> Void) throws -> String) -> String? {
