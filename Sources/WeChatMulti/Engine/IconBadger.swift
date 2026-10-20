@@ -14,26 +14,54 @@ enum IconBadger {
     private static let pixelSizes = [16, 32, 64, 128, 256, 512, 1024]
 
     static func apply(app: URL, sourceApp: URL, label: String) throws {
+        let fm = FileManager.default
         let base = NSWorkspace.shared.icon(forFile: sourceApp.path)
         let resources = app.appendingPathComponent("Contents/Resources", isDirectory: true)
-        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try fm.createDirectory(at: resources, withIntermediateDirectories: true)
         let out = resources.appendingPathComponent(iconFileName + ".icns")
 
-        guard let dest = CGImageDestinationCreateWithURL(out as CFURL,
-                                                         UTType.icns.identifier as CFString,
-                                                         pixelSizes.count, nil) else {
-            throw BadgeError.writeFailed(out.path)
-        }
-        for px in pixelSizes {
+        // 用系统 iconutil 从标准 .iconset 生成 icns —— 比 ImageIO 直接写 ICNS 可靠（后者对部分尺寸静默失败）。
+        let iconset = fm.temporaryDirectory
+            .appendingPathComponent("wechatmulti-" + UUID().uuidString + ".iconset", isDirectory: true)
+        try fm.createDirectory(at: iconset, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: iconset) }
+
+        let entries: [(String, Int)] = [
+            ("icon_16x16", 16), ("icon_16x16@2x", 32),
+            ("icon_32x32", 32), ("icon_32x32@2x", 64),
+            ("icon_128x128", 128), ("icon_128x128@2x", 256),
+            ("icon_256x256", 256), ("icon_256x256@2x", 512),
+            ("icon_512x512", 512), ("icon_512x512@2x", 1024),
+        ]
+        for (name, px) in entries {
             guard let image = render(base: base, label: label, px: px) else { throw BadgeError.renderFailed(px) }
-            CGImageDestinationAddImage(dest, image, nil)
+            try writePNG(image, to: iconset.appendingPathComponent(name + ".png"))
         }
-        guard CGImageDestinationFinalize(dest) else { throw BadgeError.writeFailed(out.path) }
+
+        if fm.fileExists(atPath: out.path) { try fm.removeItem(at: out) }
+        try Shell.run("/usr/bin/iconutil", ["-c", "icns", iconset.path, "-o", out.path])
+        guard fm.fileExists(atPath: out.path) else { throw BadgeError.writeFailed(out.path) }
 
         try IdentityRewriter.mutatePlist(app.appendingPathComponent("Contents/Info.plist")) { dict in
             dict["CFBundleIconFile"] = iconFileName
             dict.removeValue(forKey: "CFBundleIconName")
         }
+        Log.info("角标图标已写入 " + out.path)
+    }
+
+    private static func writePNG(_ image: CGImage, to url: URL) throws {
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            throw BadgeError.writeFailed(url.path)
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else { throw BadgeError.writeFailed(url.path) }
+    }
+
+    /// 让 Finder / Dock 丢掉旧图标缓存：touch 包目录 + 重新登记 + 重启 Dock（Dock 会在一秒内自动回来）。
+    static func flushIconCache(app: URL) {
+        _ = try? Shell.run("/usr/bin/touch", [app.path], allowFailure: true)
+        _ = try? Shell.run("/usr/bin/touch", [app.appendingPathComponent("Contents/Info.plist").path], allowFailure: true)
+        _ = try? Shell.run("/usr/bin/killall", ["Dock"], allowFailure: true)
     }
 
     /// 纯 CoreGraphics 绘制，可在后台线程调用（不依赖 NSImage.lockFocus）。
