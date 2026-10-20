@@ -5,11 +5,13 @@
 ## 原理
 
 1. APFS `clonefile` 克隆 `/Applications/WeChat.app`（约 0.1 秒）
-2. 改写 bundle id（主程序 + 5 个嵌套组件）和显示名「微信 N」
+2. 改写 bundle id（主程序 + 5 个嵌套组件）和显示名「微信 N」，图标叠加编号角标
 3. 在 Info.plist 写入 `LSEnvironment.CFFIXED_USER_HOME`，把数据根钉到独立目录
 4. 禁用 Sparkle 自动更新，防止实例自行升级覆盖注入
 5. 去沙盒、由内向外 ad-hoc 重签全部 Mach-O
-6. `lsregister -f` 刷新 LaunchServices 缓存
+6. 校验通过后与旧 App 原子互换（`renamex_np` RENAME_SWAP），再 `lsregister -f` 刷新 LaunchServices 缓存
+
+全部步骤都在暂存区完成，任何一步失败，正在用的实例都不受影响。
 
 官方微信本身不会被改动。详细设计见 [产品方案.md](产品方案.md)。
 
