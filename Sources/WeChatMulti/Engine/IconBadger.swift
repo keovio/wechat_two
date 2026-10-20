@@ -1,10 +1,11 @@
 import AppKit
+import CoreText
 import ImageIO
 import UniformTypeIdentifiers
 
-/// 给实例图标叠一个编号角标，让 Dock / 启动台 / 应用切换器里一眼分清「微信 1」「微信 2」。
+/// 给实例图标叠一个编号标签，让 Dock / 启动台 / 应用切换器里一眼分清「微信 1」「微信 2」。
 ///
-/// 做法：取官方微信的图标 → 每个尺寸画一枚红色圆形数字角标 → 写成新的 .icns，
+/// 做法：取官方微信的图标 → 每个尺寸在左下角画一枚白色圆角编号标签 → 写成新的 .icns，
 /// 再把 Info.plist 的 CFBundleIconFile 指向它，并移除 CFBundleIconName
 /// （否则系统优先用 Assets.car 里的原图标，角标不生效）。
 ///
@@ -64,7 +65,10 @@ enum IconBadger {
         _ = try? Shell.run("/usr/bin/killall", ["Dock"], allowFailure: true)
     }
 
-    /// 纯 CoreGraphics 绘制，可在后台线程调用（不依赖 NSImage.lockFocus）。
+    /// 纯 CoreGraphics / CoreText 绘制，可在后台线程调用（不依赖 NSImage.lockFocus）。
+    ///
+    /// 样式：左下角白色圆角方块 + 绿色编号。
+    /// 刻意避开「右上角红色圆点」—— 那是系统未读角标的位置和样式，容易误以为有新消息。
     static func render(base: NSImage, label: String, px: Int) -> CGImage? {
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
@@ -80,39 +84,62 @@ enum IconBadger {
             ctx.draw(cg, in: canvas)
         }
 
-        // 右上角圆形角标（CG 坐标原点在左下）。
-        let d = s * 0.44
-        let inset = s * 0.03
-        let badge = CGRect(x: s - d - inset, y: s - d - inset, width: d, height: d)
-        ctx.setFillColor(CGColor(red: 0.96, green: 0.26, blue: 0.21, alpha: 1))
-        ctx.fillEllipse(in: badge)
-        if px >= 32 {
-            ctx.setStrokeColor(CGColor(gray: 1, alpha: 1))
-            ctx.setLineWidth(max(1, s * 0.02))
-            ctx.strokeEllipse(in: badge.insetBy(dx: s * 0.01, dy: s * 0.01))
-        }
+        // 左下角标签（CG 坐标原点在左下）。macOS 图标主体约占画布 10%~90%，标签压在主体左下角内侧。
+        let side = s * 0.30
+        let tag = CGRect(x: s * 0.13, y: s * 0.13, width: side, height: side)
+        let path = CGPath(roundedRect: tag, cornerWidth: side * 0.27, cornerHeight: side * 0.27, transform: nil)
 
-        let gc = NSGraphicsContext(cgContext: ctx, flipped: false)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = gc
-        let fontSize = d * (label.count > 1 ? 0.48 : 0.62)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: fontSize, weight: .heavy),
-            .foregroundColor: NSColor.white,
-        ]
-        let text = NSAttributedString(string: label, attributes: attrs)
-        let size = text.size()
-        text.draw(at: CGPoint(x: badge.midX - size.width / 2, y: badge.midY - size.height / 2))
-        NSGraphicsContext.restoreGraphicsState()
+        ctx.saveGState()
+        if px >= 32 {
+            ctx.setShadow(offset: CGSize(width: 0, height: -s * 0.012), blur: s * 0.03,
+                          color: CGColor(gray: 0, alpha: 0.35))
+        }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.addPath(path)
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        let fontSize = side * (label.count > 1 ? 0.58 : 0.78)
+        drawText(label, in: ctx, center: CGPoint(x: tag.midX, y: tag.midY),
+                 font: NSFont.systemFont(ofSize: fontSize, weight: .heavy),
+                 color: CGColor(red: 0.03, green: 0.63, blue: 0.31, alpha: 1))
 
         return ctx.makeImage()
+    }
+
+    /// 按字形实际外框居中绘制文字（比 NSAttributedString.size 的行高居中更准）。
+    @discardableResult
+    static func drawText(_ string: String, in ctx: CGContext, center: CGPoint? = nil, origin: CGPoint? = nil,
+                         font: NSFont, color: CGColor) -> CGRect {
+        let attrs: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: string, attributes: attrs))
+        let b = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        var pos = CGPoint.zero
+        if let c = center { pos = CGPoint(x: c.x - b.midX, y: c.y - b.midY) }
+        if let o = origin { pos = CGPoint(x: o.x - b.minX, y: o.y - b.minY) }
+        ctx.saveGState()
+        ctx.textMatrix = .identity
+        ctx.textPosition = pos
+        CTLineDraw(line, ctx)
+        ctx.restoreGState()
+        return b.offsetBy(dx: pos.x, dy: pos.y)
+    }
+
+    /// 只测量字形外框，不绘制。
+    static func measureText(_ string: String, font: NSFont) -> CGRect {
+        let attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String): font]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: string, attributes: attrs))
+        return CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
     }
 
     // MARK: - 菜单栏（状态栏）小图标
 
     /// 微信自己在系统菜单栏画的小图标也一样，多开后分不清。
     /// 构建时扫描包内名字含 status / menubar / tray 的小尺寸 PNG/TIFF，
-    /// 在右下角挖出一个带编号的实心圆（对模板图和彩色图都有效）。
+    /// 改成「原图标缩小 + 右侧编号」（对模板图和彩色图都有效）。
     /// 返回改写的文件数；放在 Assets.car 里的图标改不到，日志会记下来。
     @discardableResult
     static func badgeStatusIcons(app: URL, label: String) -> Int {
@@ -144,32 +171,31 @@ enum IconBadger {
         return changed
     }
 
+    /// 菜单栏小图标样式：原图标缩小靠左 + 右侧大号数字（不画圆点，避免像未读提醒）。
+    /// 只用黑色 + 透明，模板图渲染成单色时同样清楚。
     static func stampStatus(_ img: CGImage, label: String) -> CGImage? {
         let w = img.width, h = img.height
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         let W = CGFloat(w), H = CGFloat(h)
-        ctx.draw(img, in: CGRect(x: 0, y: 0, width: W, height: H))
+        let gap = W * 0.05
 
-        let d = min(W, H) * 0.62
-        let circle = CGRect(x: W - d, y: 0, width: d, height: d)   // 右下角
-        // 先清出一圈透明描边，再画实心圆，数字用 clear 挖空 —— 模板图渲染成单色时也能看清。
-        ctx.setBlendMode(.clear)
-        ctx.fillEllipse(in: circle.insetBy(dx: -d * 0.12, dy: -d * 0.12))
-        ctx.setBlendMode(.normal)
-        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
-        ctx.fillEllipse(in: circle)
+        // 数字尽量大；两位数时缩小字号，保证原图标至少保留 40% 宽度。
+        var font = NSFont.systemFont(ofSize: H * 0.92, weight: .black)
+        var digit = measureText(label, font: font)
+        while digit.width > W * 0.55, font.pointSize > H * 0.4 {
+            font = NSFont.systemFont(ofSize: font.pointSize * 0.9, weight: .black)
+            digit = measureText(label, font: font)
+        }
 
-        let gc = NSGraphicsContext(cgContext: ctx, flipped: false)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = gc
-        ctx.setBlendMode(.clear)
-        let font = NSFont.systemFont(ofSize: d * (label.count > 1 ? 0.55 : 0.75), weight: .black)
-        let text = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: NSColor.black])
-        let size = text.size()
-        text.draw(at: CGPoint(x: circle.midX - size.width / 2, y: circle.midY - size.height / 2))
-        NSGraphicsContext.restoreGraphicsState()
+        let k = max(0.4, min(0.62, (W - digit.width - gap) / W))
+        let gw = W * k, gh = H * k
+        ctx.interpolationQuality = .high
+        ctx.draw(img, in: CGRect(x: 0, y: (H - gh) / 2, width: gw, height: gh))
+
+        drawText(label, in: ctx, origin: CGPoint(x: W - digit.width, y: (H - digit.height) / 2),
+                 font: font, color: CGColor(gray: 0, alpha: 1))
         return ctx.makeImage()
     }
 
