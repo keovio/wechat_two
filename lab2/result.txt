@@ -1,0 +1,4 @@
+CFFIXED_USER_HOME=/tmp/lsenv_probe_home
+WXMULTI_TEST=injected_ok
+HOME=/Users/keovi
+pid=98862

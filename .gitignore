@@ -1,0 +1,26 @@
+# Swift / SPM 构建产物
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+DerivedData/
+
+# 本地构建缓存（120M，不进版本库）
+.cache/
+
+# macOS
+.DS_Store
+.AppleDouble
+LSOverride
+
+# 编译产物与临时文件
+*.o
+*.d
+*.swiftmodule
+*.swiftsourceinfo
+*.app/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+*~
