@@ -9,8 +9,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
-        statusItem.button?.title = "微"
-        statusItem.button?.toolTip = "微信多开"
+        if let image = NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill",
+                               accessibilityDescription: "微信多开") {
+            image.isTemplate = true
+            statusItem.button?.image = image
+        } else {
+            statusItem.button?.title = "微"
+        }
+        statusItem.button?.toolTip = "微信多开 " + AppInfo.version
 
         let menu = NSMenu()
         menu.delegate = self
@@ -45,8 +51,32 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.addItem(empty)
         }
 
+        // 官方微信升级后，旧克隆体不会跟着升级 —— 在菜单顶部提醒并给出一键重建。
+        let official = WeChatLocator.officialVersion()
+        let outdated = outdatedInstances(official: official)
+        if let official, !outdated.isEmpty {
+            let notice = NSMenuItem(title: "⚠︎ 微信已更新到 " + official + "，" + String(outdated.count) + " 个实例待重建",
+                                    action: nil, keyEquivalent: "")
+            notice.isEnabled = false
+            menu.addItem(notice)
+            let rebuildAll = NSMenuItem(title: "全部重建（保留数据）…", action: #selector(rebuildOutdated), keyEquivalent: "")
+            rebuildAll.target = self
+            menu.addItem(rebuildAll)
+            menu.addItem(.separator())
+        }
+
         for record in config.instances {
-            menu.addItem(instanceMenuItem(record))
+            menu.addItem(instanceMenuItem(record, official: official))
+        }
+
+        if !config.instances.isEmpty {
+            menu.addItem(.separator())
+            let startAll = NSMenuItem(title: "全部启动", action: #selector(startAll), keyEquivalent: "")
+            startAll.target = self
+            menu.addItem(startAll)
+            let stopAll = NSMenuItem(title: "全部退出", action: #selector(stopAll), keyEquivalent: "")
+            stopAll.target = self
+            menu.addItem(stopAll)
         }
 
         menu.addItem(.separator())
@@ -69,13 +99,27 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        let login = NSMenuItem(title: LoginItem.needsApproval ? "登录时启动（待系统设置中允许）" : "登录时启动",
+                               action: #selector(toggleLoginItem(_:)), keyEquivalent: "")
+        login.target = self
+        login.state = LoginItem.isEnabled ? .on : .off
+        menu.addItem(login)
+
+        let about = NSMenuItem(title: "关于 微信多开 " + AppInfo.version, action: nil, keyEquivalent: "")
+        about.isEnabled = false
+        menu.addItem(about)
+
         let quit = NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
     }
 
-    private func instanceMenuItem(_ record: InstanceRecord) -> NSMenuItem {
+    private func instanceMenuItem(_ record: InstanceRecord, official: String?) -> NSMenuItem {
         let status = InstanceRuntime.status(of: record)
-        let item = NSMenuItem(title: status.symbol + "  " + record.name, action: nil, keyEquivalent: "")
+        var title = status.symbol + "  " + record.name
+        if let official, official != record.sourceVersion {
+            title += "  · 旧版 " + record.sourceVersion
+        }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
 
         let sub = NSMenu()
         let infoApp = NSMenuItem(title: "实例 App：" + record.appPath, action: nil, keyEquivalent: "")
@@ -226,6 +270,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         let ok = ProgressAlert.run(title: "正在重建「" + record.name + "」") { report in
+            // 运行中的实例持有 home/ 里的文件句柄，必须先退出再挪动数据目录。
+            if InstanceRuntime.status(of: record) == .running {
+                report("正在退出运行中的实例…")
+                try InstanceRuntime.stop(record)
+            }
             let result = try InstanceBuilder.rebuild(id: record.id, source: source) { progress in
                 report("步骤 " + String(progress.step) + "/" + String(progress.total) + " · " + progress.title)
             }
@@ -260,6 +309,86 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             ProgressAlert.presentError(error)
         }
         reloadConfig()
+    }
+
+    private func outdatedInstances(official: String?) -> [InstanceRecord] {
+        guard let official else { return [] }
+        return config.instances.filter { $0.sourceVersion != official
+            && FileManager.default.fileExists(atPath: $0.appPath) }
+    }
+
+    @objc private func rebuildOutdated() {
+        let targets = outdatedInstances(official: WeChatLocator.officialVersion())
+        guard !targets.isEmpty else { return }
+
+        let confirm = NSAlert()
+        confirm.messageText = "用新版官方微信重建 " + String(targets.count) + " 个实例？"
+        confirm.informativeText = "运行中的实例会先被退出。登录态与聊天记录保存在独立的数据目录中，不会丢失。"
+        confirm.addButton(withTitle: "全部重建")
+        confirm.addButton(withTitle: "取消")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+
+        let source: WeChatLocator.Info
+        do {
+            source = try WeChatLocator.locate()
+        } catch {
+            ProgressAlert.presentError(error)
+            return
+        }
+
+        let done = ProgressAlert.run(title: "正在重建 " + String(targets.count) + " 个实例") { report in
+            var names: [String] = []
+            for record in targets {
+                if InstanceRuntime.status(of: record) == .running {
+                    report(record.name + " · 正在退出…")
+                    try InstanceRuntime.stop(record)
+                }
+                _ = try InstanceBuilder.rebuild(id: record.id, source: source) { progress in
+                    report(record.name + " · 步骤 " + String(progress.step) + "/" + String(progress.total) + " · " + progress.title)
+                }
+                names.append(record.name)
+            }
+            return names.joined(separator: "、")
+        }
+
+        if let names = done {
+            ProgressAlert.info("已重建到 " + source.version, detail: names)
+        }
+        reloadConfig()
+    }
+
+    @objc private func startAll() {
+        var errors: [String] = []
+        for record in config.instances where InstanceRuntime.status(of: record) == .stopped {
+            do { try InstanceRuntime.start(record) } catch { errors.append(record.name + "：" + error.localizedDescription) }
+        }
+        if !errors.isEmpty {
+            ProgressAlert.info("部分实例启动失败", detail: errors.joined(separator: "\n"))
+        }
+    }
+
+    @objc private func stopAll() {
+        let running = config.instances.filter { InstanceRuntime.status(of: $0) == .running }
+        guard !running.isEmpty else { return }
+        _ = ProgressAlert.run(title: "正在退出 " + String(running.count) + " 个实例") { report in
+            for record in running {
+                report("正在退出 " + record.name + "…")
+                try InstanceRuntime.stop(record)
+            }
+            return ""
+        }
+    }
+
+    @objc private func toggleLoginItem(_ sender: NSMenuItem) {
+        do {
+            try LoginItem.setEnabled(!LoginItem.isEnabled)
+            if LoginItem.needsApproval {
+                ProgressAlert.info("还差一步", detail: "请在「系统设置 → 通用 → 登录项」里允许「微信多开」。")
+                LoginItem.openSystemSettings()
+            }
+        } catch {
+            ProgressAlert.presentError(error)
+        }
     }
 
     @objc private func revealApps() {
