@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译并组装 .app
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          APP_VERSION="$VERSION" APP_BUILD="$GITHUB_RUN_NUMBER" bash build.sh
+
+      - name: 打包 DMG
+        run: |
+          APP=".cache/scratch/release/WeChatMulti.app"
+          codesign -v --verbose=2 "$APP"
+          mkdir -p dmg
+          cp -R "$APP" "dmg/微信多开.app"
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "微信多开" -srcfolder dmg -ov -format UDZO "WeChatMulti-${VERSION}.dmg"
+          shasum -a 256 "WeChatMulti-${VERSION}.dmg" | tee "WeChatMulti-${VERSION}.dmg.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WeChatMulti-${{ env.VERSION }}
+          path: |
+            WeChatMulti-*.dmg
+            WeChatMulti-*.dmg.sha256
+
+      - name: 发布 Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'NOTES'
+          ## 安装
+          1. 打开 dmg，把「微信多开」拖进「应用程序」。
+          2. 因为是 ad-hoc 签名（未公证），首次打开前在终端执行一次：
+             `xattr -dr com.apple.quarantine /Applications/微信多开.app`
+          3. 打开后在菜单栏点 💬 图标 →「新建实例…」。
+
+          ## 要求
+          macOS 14+，Apple Silicon，已安装官方微信（/Applications/WeChat.app），磁盘为 APFS。
+
+          > 自用工具，修改客户端可能违反微信用户协议，请勿在高价值账号上使用。
+          NOTES
+          sed -i '' 's/^          //' notes.md
+          gh release create "$GITHUB_REF_NAME" WeChatMulti-*.dmg WeChatMulti-*.dmg.sha256 \
+            --title "微信多开 $GITHUB_REF_NAME" --notes-file notes.md
