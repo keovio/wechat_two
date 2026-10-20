@@ -108,6 +108,71 @@ enum IconBadger {
         return ctx.makeImage()
     }
 
+    // MARK: - 菜单栏（状态栏）小图标
+
+    /// 微信自己在系统菜单栏画的小图标也一样，多开后分不清。
+    /// 构建时扫描包内名字含 status / menubar / tray 的小尺寸 PNG/TIFF，
+    /// 在右下角挖出一个带编号的实心圆（对模板图和彩色图都有效）。
+    /// 返回改写的文件数；放在 Assets.car 里的图标改不到，日志会记下来。
+    @discardableResult
+    static func badgeStatusIcons(app: URL, label: String) -> Int {
+        let fm = FileManager.default
+        let pattern = try! NSRegularExpression(pattern: "(status|menubar|menu_bar|tray)", options: [.caseInsensitive])
+        let exts: Set<String> = ["png", "tiff", "tif"]
+        guard let walker = fm.enumerator(at: app.appendingPathComponent("Contents"),
+                                         includingPropertiesForKeys: [.isRegularFileKey]) else { return 0 }
+        var changed = 0
+        for case let url as URL in walker {
+            guard exts.contains(url.pathExtension.lowercased()) else { continue }
+            let name = url.deletingPathExtension().lastPathComponent
+            guard pattern.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil else { continue }
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let img = CGImageSourceCreateImageAtIndex(src, 0, nil),
+                  img.width <= 256, img.height <= 256,
+                  let type = CGImageSourceGetType(src),
+                  let out = stampStatus(img, label: label) else { continue }
+            guard let dest = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else { continue }
+            CGImageDestinationAddImage(dest, out, nil)
+            if CGImageDestinationFinalize(dest) {
+                changed += 1
+                Log.info("菜单栏图标已加编号：" + url.path)
+            }
+        }
+        if changed == 0 {
+            Log.warn("没找到可改的菜单栏图标文件（可能在 Assets.car 里）")
+        }
+        return changed
+    }
+
+    private static func stampStatus(_ img: CGImage, label: String) -> CGImage? {
+        let w = img.width, h = img.height
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        let W = CGFloat(w), H = CGFloat(h)
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: W, height: H))
+
+        let d = min(W, H) * 0.62
+        let circle = CGRect(x: W - d, y: 0, width: d, height: d)   // 右下角
+        // 先清出一圈透明描边，再画实心圆，数字用 clear 挖空 —— 模板图渲染成单色时也能看清。
+        ctx.setBlendMode(.clear)
+        ctx.fillEllipse(in: circle.insetBy(dx: -d * 0.12, dy: -d * 0.12))
+        ctx.setBlendMode(.normal)
+        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        ctx.fillEllipse(in: circle)
+
+        let gc = NSGraphicsContext(cgContext: ctx, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = gc
+        ctx.setBlendMode(.clear)
+        let font = NSFont.systemFont(ofSize: d * (label.count > 1 ? 0.55 : 0.75), weight: .black)
+        let text = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: NSColor.black])
+        let size = text.size()
+        text.draw(at: CGPoint(x: circle.midX - size.width / 2, y: circle.midY - size.height / 2))
+        NSGraphicsContext.restoreGraphicsState()
+        return ctx.makeImage()
+    }
+
     enum BadgeError: Error, LocalizedError {
         case renderFailed(Int)
         case writeFailed(String)
