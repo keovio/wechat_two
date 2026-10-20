@@ -63,6 +63,14 @@ enum Paths {
         instancesDir.appendingPathComponent(id, isDirectory: true)
     }
 
+    /// 构建暂存区：新 App 包先在这里克隆、改写、重签、校验，全部通过后才原子替换到 ~/Applications。
+    /// 与 appsDir 同处用户数据卷，保证 rename 是同卷原子操作。
+    static var stagingDir: URL { supportRoot.appendingPathComponent("staging", isDirectory: true) }
+
+    static func stagingBundle(_ id: String) -> URL {
+        stagingDir.appendingPathComponent(id + ".app", isDirectory: true)
+    }
+
     static func instancePlist(_ id: String) -> URL {
         appBundle(id).appendingPathComponent("Contents/Info.plist")
     }
