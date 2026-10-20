@@ -8,6 +8,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="WeChatMulti"
+# 版本号可由 CI 注入：APP_VERSION=0.2.0 APP_BUILD=12 ./build.sh
+APP_VERSION="${APP_VERSION:-0.2.0}"
+APP_BUILD="${APP_BUILD:-1}"
 
 # ---- 工具链选择 ----------------------------------------------------------
 # 本机 CommandLineTools 的 swiftc 与它自带的 MacOSX15.0.sdk 版本错配
@@ -69,6 +72,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD" "$APP/Contents/Info.plist"
 
 echo "==> 签名（ad-hoc，无 entitlements）"
 codesign --force --sign - --timestamp=none "$APP"
