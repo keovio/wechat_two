@@ -190,55 +190,67 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         Log.info("开始创建实例 " + nextID + "（" + name + "）")
 
-        let outcome = ProgressAlert.run(title: "正在创建「" + name + "」") { report in
+        // 自检要跑整包 codesign -v，同样放进后台，避免创建完成后菜单栏再卡一下。
+        let summary = ProgressAlert.run(title: "正在创建「" + name + "」") { report in
             let result = try InstanceBuilder.create(id: nextID, source: source) { progress in
                 report("步骤 " + String(progress.step) + "/" + String(progress.total) + " · " + progress.title)
             }
-            return result.record.bundleID
+            report("隔离自检…")
+            let failed = SelfCheck.check(record: result.record).filter { !$0.passed }
+            return failed.map { $0.title + "：" + $0.detail }.joined(separator: "\n")
         }
 
-        if let bundleID = outcome {
-            Log.info("实例创建完成 " + bundleID)
-            // 创建后立刻自检一次，把"数据根是否钉住"这件事当场说清楚。
-            if let record = (try? InstanceStore.load())?.instances.first(where: { $0.id == nextID }) {
-                let items = SelfCheck.check(record: record)
-                let failed = items.filter { !$0.passed }
-                if failed.isEmpty {
-                    ProgressAlert.info("「" + record.name + "」创建完成", detail: "7 项隔离自检全部通过。\n\n已放入 " + record.appPath + "，可在启动台 / Spotlight 搜到，也可从 Dock 双击启动。")
-                } else {
-                    ProgressAlert.info("「" + record.name + "」创建完成，但有 " + String(failed.count) + " 项自检未通过",
-                                       detail: failed.map { $0.title + "：" + $0.detail }.joined(separator: "\n"))
-                }
+        if let summary {
+            Log.info("实例创建完成 " + nextID)
+            let appPath = Paths.appBundle(nextID).path
+            if summary.isEmpty {
+                ProgressAlert.info("「" + name + "」创建完成",
+                                   detail: "7 项隔离自检全部通过。\n\n已放入 " + appPath + "，可在启动台 / Spotlight 搜到，也可从 Dock 双击启动。")
+            } else {
+                ProgressAlert.info("「" + name + "」创建完成，但有自检项未通过", detail: summary)
             }
         }
         reloadConfig()
     }
 
+    /// 把可能耗时数秒的操作（LaunchServices 握手、等待进程退出、pgrep）挪出主线程，
+    /// 菜单栏始终可响应；出错时回到主线程弹窗。
+    private func inBackground(_ work: @escaping () throws -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try work()
+            } catch {
+                DispatchQueue.main.async { ProgressAlert.presentError(error) }
+            }
+        }
+    }
+
     @objc private func startInstance(_ sender: NSMenuItem) {
         guard let record = sender.representedObject as? InstanceRecord else { return }
-        do {
+        inBackground {
             try InstanceRuntime.start(record)
             Log.info("已启动 " + record.name)
-        } catch {
-            ProgressAlert.presentError(error)
         }
     }
 
     @objc private func stopInstance(_ sender: NSMenuItem) {
         guard let record = sender.representedObject as? InstanceRecord else { return }
-        do {
+        inBackground {
             try InstanceRuntime.stop(record)
             Log.info("已退出 " + record.name)
-        } catch {
-            ProgressAlert.presentError(error)
         }
     }
 
     @objc private func runSelfCheck(_ sender: NSMenuItem) {
         guard let record = sender.representedObject as? InstanceRecord else { return }
-        let items = SelfCheck.check(record: record)
-        let lines = items.map { $0.symbol + "  " + $0.title + "\n      " + $0.detail }
-        ProgressAlert.info(record.name + " · 隔离自检", detail: lines.joined(separator: "\n"))
+        let text = ProgressAlert.run(title: record.name + " · 隔离自检中…") { _ in
+            SelfCheck.check(record: record)
+                .map { $0.symbol + "  " + $0.title + "\n      " + $0.detail }
+                .joined(separator: "\n")
+        }
+        if let text {
+            ProgressAlert.info(record.name + " · 隔离自检", detail: text)
+        }
     }
 
     @objc private func openDataDir(_ sender: NSMenuItem) {
@@ -298,15 +310,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         confirm.addButton(withTitle: "取消")
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
 
-        if InstanceRuntime.status(of: record) == .running {
-            do { try InstanceRuntime.stop(record) } catch { Log.warn("停止实例失败：" + error.localizedDescription) }
-        }
-
-        do {
+        _ = ProgressAlert.run(title: "正在删除「" + record.name + "」") { report in
+            if InstanceRuntime.status(of: record) == .running {
+                report("正在退出实例…")
+                do { try InstanceRuntime.stop(record) } catch { Log.warn("停止实例失败：" + error.localizedDescription) }
+            }
+            report("正在删除文件…")
             try InstanceBuilder.delete(id: record.id, removeData: true)
             Log.info("已删除实例 " + record.name)
-        } catch {
-            ProgressAlert.presentError(error)
+            return ""
         }
         reloadConfig()
     }
@@ -358,12 +370,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func startAll() {
-        var errors: [String] = []
-        for record in config.instances where InstanceRuntime.status(of: record) == .stopped {
-            do { try InstanceRuntime.start(record) } catch { errors.append(record.name + "：" + error.localizedDescription) }
-        }
-        if !errors.isEmpty {
-            ProgressAlert.info("部分实例启动失败", detail: errors.joined(separator: "\n"))
+        let targets = config.instances.filter { InstanceRuntime.status(of: $0) == .stopped }
+        guard !targets.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var errors: [String] = []
+            for record in targets {
+                do { try InstanceRuntime.start(record) } catch { errors.append(record.name + "：" + error.localizedDescription) }
+            }
+            if !errors.isEmpty {
+                DispatchQueue.main.async {
+                    ProgressAlert.info("部分实例启动失败", detail: errors.joined(separator: "\n"))
+                }
+            }
         }
     }
 
