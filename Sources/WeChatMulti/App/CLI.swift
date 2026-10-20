@@ -17,6 +17,11 @@ enum CLI {
                 return try stop(args)
             case "rebuild":
                 return try rebuild(args)
+            case "rebuild-all":
+                return try rebuildAll()
+            case "version", "--version", "-v":
+                print("微信多开 " + AppInfo.version + "（build " + AppInfo.build + "）")
+                return 0
             case "delete":
                 return try delete(args)
             case "doctor":
@@ -168,6 +173,32 @@ enum CLI {
         return ok ? 0 : 1
     }
 
+    /// 微信升级后：把所有落后于官方版本的实例一次性重建（数据保留）。
+    private static func rebuildAll() throws -> Int32 {
+        let source = try WeChatLocator.locate()
+        let targets = (try InstanceStore.load()).instances.filter { $0.sourceVersion != source.version }
+        if targets.isEmpty {
+            print("所有实例已是官方 " + source.version + "，无需重建")
+            return 0
+        }
+        var failed = 0
+        for record in targets {
+            print("── 重建 " + record.name + "（" + record.sourceVersion + " → " + source.version + "）")
+            do {
+                if InstanceRuntime.status(of: record) == .running {
+                    try InstanceRuntime.stop(record)
+                }
+                _ = try InstanceBuilder.rebuild(id: record.id, source: source) { p in
+                    print("  [" + String(p.step) + "/" + String(p.total) + "] " + p.title)
+                }
+            } catch {
+                failed += 1
+                print("  ❌ " + error.localizedDescription)
+            }
+        }
+        return failed == 0 ? 0 : 1
+    }
+
     private static func delete(_ args: [String]) throws -> Int32 {
         guard let id = args.first else { throw CLIError.missingArgument("实例 ID") }
         guard let record = (try InstanceStore.load()).instances.first(where: { $0.id == id }) else {
@@ -232,8 +263,10 @@ enum CLI {
           start ID            启动实例（经 LaunchServices，保证注入数据根）
           stop ID             退出实例（保留数据）
           rebuild ID          用当前官方版本重建实例 App（数据保留）
+          rebuild-all         重建所有落后于官方版本的实例（微信升级后用）
           check [ID]          隔离自检（不给 ID 则检查全部）
           delete ID           删除实例及其数据
+          version             显示管理器版本
 
         不带参数直接运行则进入菜单栏 App 模式。
         """)
