@@ -92,6 +92,11 @@ enum InstanceBuilder {
             Log.warn("[" + id + "] 角标图标生成失败，沿用官方图标：" + error.localizedDescription)
         }
         IconBadger.badgeStatusIcons(app: staging, label: String(Int(id) ?? 0))
+        do {
+            try TrayIconPatcher.patch(app: staging, label: String(Int(id) ?? 0))
+        } catch {
+            Log.warn("[" + id + "] 菜单栏图标改写失败：" + error.localizedDescription)
+        }
 
         // ---- 6. 注入数据根 ----
         step(6, "注入 CFFIXED_USER_HOME")
