@@ -40,9 +40,23 @@ enum Shell {
             throw ShellError.launchFailed(launchPath, error)
         }
 
-        // 先读完管道再 wait，避免大输出把子进程堵死。
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        // stdout / stderr 必须**并发**读完再 wait：
+        // 串行读时，若子进程先把 stderr 的 64KB 管道缓冲写满（codesign -v 很容易），
+        // 它会阻塞在 write 上，而我们阻塞在读 stdout 的 EOF 上 —— 双方互等，死锁。
+        var outData = Data()
+        var errData = Data()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.wait()
         p.waitUntilExit()
 
         let result = ShellResult(
